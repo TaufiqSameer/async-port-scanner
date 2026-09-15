@@ -1,6 +1,13 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Instant;
-use tokio::net::{TcpSocket, TcpStream};
+use std::time::{Duration, Instant};
+use tokio::net::{TcpStream};
+use tokio::time::{timeout};
+
+enum PortStatus{
+    Open,
+    Closed,
+    TimedOut
+}
 
 #[tokio::main]
 async fn main() {
@@ -15,25 +22,31 @@ async fn main() {
     for port_number in start_port..=end_port {
         println!("Scanning port {}", port_number);
         let res = port_scan(ip, port_number).await;
-        if (res) {
-            println!("{} is open", port_number);
+        match res {
+            PortStatus::Closed => println!("The port {} is closed",port_number),
+            PortStatus::Open => println!("The port {} is open",port_number),
+            PortStatus::TimedOut => println!("The port {} timed out",port_number)
         }
     }
     let end = Instant::now();
     println!("The time is {:?}",end-start);
 }
 
-async fn port_scan(ip: Ipv4Addr, port: u16) -> bool {
+async fn port_scan(ip: Ipv4Addr, port: u16) -> PortStatus {
     let socket_address = SocketAddr::new(std::net::IpAddr::V4(ip), port);
-    let conn = TcpStream::connect(socket_address).await;
-    match conn {
-        Ok(_) => {
+    let conn = TcpStream::connect(socket_address);
+    let timer = timeout(Duration::from_millis(500),conn).await;
+    match timer {
+        Ok(Ok(_)) => {
             // println!("{:?} is open",val);
-            return true;
+            return PortStatus::Open;
+        }
+        Ok(Err(_)) => {
+            return PortStatus::Closed;
         }
         Err(_) => {
             // println!("The port is not open, {}",val);
-            return false;
+            return PortStatus::TimedOut;
         }
     }
 }
