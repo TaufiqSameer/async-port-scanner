@@ -10,6 +10,22 @@ enum PortStatus {
     Closed,
     TimedOut,
 }
+enum ScanError {
+    Semaphore(tokio::sync::AcquireError),
+    Task(tokio::task::JoinError),
+}
+struct ScanResult {
+    port : u16,
+    status : PortStatus,
+    ip : Ipv4Addr
+    
+}
+
+impl ScanResult {
+    fn new(port: u16,status: PortStatus, ip : Ipv4Addr) -> Self {
+        ScanResult { port : port, status : status , ip : ip}
+    }
+}
 #[derive(Parser)]
 struct Cli {
     ipv4: Ipv4Addr,
@@ -42,10 +58,34 @@ async fn main() {
     let start = Instant::now();
     println!("{}", args.ipv4);
     let ip = args.ipv4;
-    let semaphore = Arc::new(Semaphore::new(concurr));
+    let ports = run_scan(ip, start_port, end_port, concurr).await;
+    for scan in ports {
+        match scan.status {
+            PortStatus::Open => {
+                println!("[Open] {}:{}", scan.ip, scan.port);
+            }
+            PortStatus::TimedOut => {
+                println!("[TimedOut] {}:{}", scan.ip, scan.port);
+            }
+            PortStatus::Closed => {
+                continue;
+            }
+        }
+    }
+    let end = Instant::now();
+    println!("The time is {:?}", end - start);
+}
+
+async fn run_scan(
+    ip: Ipv4Addr,
+    start_port: u16,
+    end_port: u16,
+    concurrency: usize,
+) -> Vec<ScanResult> {
+    let mut arr = Vec::new();
+    let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::new();
     for port_number in start_port..=end_port {
-        println!("Scanning port {}", port_number);
         let semaphore = Arc::clone(&semaphore);
         let res = tokio::spawn(async move {
             let permit = semaphore.acquire_owned().await;
@@ -74,13 +114,13 @@ async fn main() {
             Ok(status) => match status {
                 Ok(status) => match status {
                     PortStatus::Open => {
-                        println!("{} port is open", port);
+                        arr.push(ScanResult::new(port, status,ip));
                     }
                     PortStatus::Closed => {
-                        println!("The port is closed {}", port);
+                        continue;
                     }
                     PortStatus::TimedOut => {
-                        println!("The port is timedout {}", port);
+                        arr.push(ScanResult::new(port,status,ip));
                     }
                 },
                 Err(e) => {
@@ -92,8 +132,7 @@ async fn main() {
             }
         }
     }
-    let end = Instant::now();
-    println!("The time is {:?}", end - start);
+    arr
 }
 
 async fn port_scan(ip: Ipv4Addr, port: u16) -> PortStatus {
