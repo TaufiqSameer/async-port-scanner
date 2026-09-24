@@ -1,4 +1,5 @@
 use clap::Parser;
+use tokio::io::AsyncReadExt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,15 +16,18 @@ enum ScanError {
     Task(tokio::task::JoinError),
 }
 struct ScanResult {
-    port : u16,
-    status : PortStatus,
-    ip : Ipv4Addr
-    
+    port: u16,
+    status: PortStatus,
+    ip: Ipv4Addr,
 }
 
 impl ScanResult {
-    fn new(port: u16,status: PortStatus, ip : Ipv4Addr) -> Self {
-        ScanResult { port : port, status : status , ip : ip}
+    fn new(port: u16, status: PortStatus, ip: Ipv4Addr) -> Self {
+        ScanResult {
+            port: port,
+            status: status,
+            ip: ip,
+        }
     }
 }
 #[derive(Parser)]
@@ -60,16 +64,22 @@ async fn main() {
     let ip = args.ipv4;
     let ports = run_scan(ip, start_port, end_port, concurr).await;
     for scan in ports {
-        match scan.status {
-            PortStatus::Open => {
-                println!("[Open] {}:{}", scan.ip, scan.port);
-            }
-            PortStatus::TimedOut => {
-                println!("[TimedOut] {}:{}", scan.ip, scan.port);
-            }
-            PortStatus::Closed => {
-                continue;
-            }
+        match scan {
+            Ok(s) => match s.status {
+                PortStatus::Open => {
+                    println!("[Open] {}:{}", s.ip, s.port);
+                }
+                PortStatus::TimedOut => {
+                    println!("[TimedOut] port {}:{}", s.ip, s.port);
+                }
+                PortStatus::Closed => {
+                    continue;
+                }
+            },
+            Err(s) => match s {
+                ScanError::Semaphore(s) => {}
+                ScanError::Task(s) => {}
+            },
         }
     }
     let end = Instant::now();
@@ -81,7 +91,7 @@ async fn run_scan(
     start_port: u16,
     end_port: u16,
     concurrency: usize,
-) -> Vec<ScanResult> {
+) -> Vec<Result<ScanResult, ScanError>> {
     let mut arr = Vec::new();
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::new();
@@ -95,7 +105,6 @@ async fn run_scan(
                     Ok(scan)
                 }
                 Err(e) => {
-                    println!("acquire error {}", e);
                     Err(e)
                 }
             }
@@ -114,21 +123,19 @@ async fn run_scan(
             Ok(status) => match status {
                 Ok(status) => match status {
                     PortStatus::Open => {
-                        arr.push(ScanResult::new(port, status,ip));
+                        arr.push(Ok(ScanResult::new(port, status, ip)));
                     }
-                    PortStatus::Closed => {
-                        continue;
-                    }
+                    PortStatus::Closed => arr.push(Ok(ScanResult { port, status, ip })),
                     PortStatus::TimedOut => {
-                        arr.push(ScanResult::new(port,status,ip));
+                        arr.push(Ok(ScanResult::new(port, status, ip)));
                     }
                 },
                 Err(e) => {
-                    println!("Acuisiotn err {}", e);
+                    arr.push(Err(ScanError::Semaphore(e)));
                 }
             },
             Err(e) => {
-                println!("Error {}", e);
+                arr.push(Err(ScanError::Task(e)));
             }
         }
     }
@@ -140,8 +147,18 @@ async fn port_scan(ip: Ipv4Addr, port: u16) -> PortStatus {
     let conn = TcpStream::connect(socket_address);
     let timer = timeout(Duration::from_millis(500), conn).await;
     match timer {
-        Ok(Ok(_)) => {
+        Ok(Ok(mut stream)) => {
             // println!("{:?} is open",val);
+            let mut buffer =  [0u8;4096];
+            let res = stream.read(&mut buffer[..]).await;
+            match res {
+                Ok(n) => {
+                    println!("{:?}",&buffer[0..n]);
+                }
+                Err(e)=> {
+                    println!("{}",e);
+                }
+            }
             return PortStatus::Open;
         }
         Ok(Err(_)) => {
