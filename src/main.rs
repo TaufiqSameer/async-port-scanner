@@ -1,8 +1,8 @@
 use clap::Parser;
-use tokio::io::AsyncReadExt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -19,14 +19,16 @@ struct ScanResult {
     port: u16,
     status: PortStatus,
     ip: Ipv4Addr,
+    banner: Option<String>,
 }
 
 impl ScanResult {
-    fn new(port: u16, status: PortStatus, ip: Ipv4Addr) -> Self {
+    fn new(port: u16, status: PortStatus, ip: Ipv4Addr, banner: Option<String>) -> Self {
         ScanResult {
             port: port,
             status: status,
             ip: ip,
+            banner: banner,
         }
     }
 }
@@ -66,9 +68,15 @@ async fn main() {
     for scan in ports {
         match scan {
             Ok(s) => match s.status {
-                PortStatus::Open => {
-                    println!("[Open] {}:{}", s.ip, s.port);
-                }
+                PortStatus::Open => match s.banner {
+                    Some(st) => {
+                        println!("Banner : {}", st);
+                        println!("[Open] {}:{}", s.ip, s.port);
+                    }
+                    None => {
+                        println!("[Open] {}:{}", s.ip, s.port);
+                    }
+                },
                 PortStatus::TimedOut => {
                     println!("[TimedOut] port {}:{}", s.ip, s.port);
                 }
@@ -104,9 +112,7 @@ async fn run_scan(
                     let scan = port_scan(ip, port_number).await;
                     Ok(scan)
                 }
-                Err(e) => {
-                    Err(e)
-                }
+                Err(e) => Err(e),
             }
         });
         handles.push((port_number, res));
@@ -121,13 +127,18 @@ async fn run_scan(
 
         match res {
             Ok(status) => match status {
-                Ok(status) => match status {
+                Ok((status, st)) => match status {
                     PortStatus::Open => {
-                        arr.push(Ok(ScanResult::new(port, status, ip)));
+                        arr.push(Ok(ScanResult::new(port, status, ip, st)));
                     }
-                    PortStatus::Closed => arr.push(Ok(ScanResult { port, status, ip })),
+                    PortStatus::Closed => arr.push(Ok(ScanResult {
+                        port,
+                        status,
+                        ip,
+                        banner: st,
+                    })),
                     PortStatus::TimedOut => {
-                        arr.push(Ok(ScanResult::new(port, status, ip)));
+                        arr.push(Ok(ScanResult::new(port, status, ip, st)));
                     }
                 },
                 Err(e) => {
@@ -142,31 +153,33 @@ async fn run_scan(
     arr
 }
 
-async fn port_scan(ip: Ipv4Addr, port: u16) -> PortStatus {
+async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Option<String>) {
     let socket_address = SocketAddr::new(std::net::IpAddr::V4(ip), port);
     let conn = TcpStream::connect(socket_address);
     let timer = timeout(Duration::from_millis(500), conn).await;
     match timer {
         Ok(Ok(mut stream)) => {
-            // println!("{:?} is open",val);
-            let mut buffer =  [0u8;4096];
-            let res = stream.read(&mut buffer[..]).await;
+            let mut buffer = [0u8; 4096];
+            let res = timeout(Duration::from_millis(1000), stream.read(&mut buffer[..])).await;
             match res {
-                Ok(n) => {
-                    println!("{:?}",&buffer[0..n]);
+                Ok(Ok(n)) => {
+                    let converted_buffer = String::from_utf8_lossy(&buffer[0..n]);
+                    return (PortStatus::Open, Some(converted_buffer.to_string()));
                 }
-                Err(e)=> {
-                    println!("{}",e);
+                Ok(Err(e0)) => {
+                    return (PortStatus::Open, None);
+                }
+                Err(_) => {
+                    return (PortStatus::Open, None);
                 }
             }
-            return PortStatus::Open;
         }
         Ok(Err(_)) => {
-            return PortStatus::Closed;
+            return (PortStatus::Closed, None);
         }
         Err(_) => {
             // println!("The port is not open, {}",val);
-            return PortStatus::TimedOut;
+            return (PortStatus::TimedOut, None);
         }
     }
 }
