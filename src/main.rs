@@ -2,7 +2,7 @@ use clap::Parser;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt,AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -160,17 +160,26 @@ async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Option<String>) {
     match timer {
         Ok(Ok(mut stream)) => {
             let mut buffer = [0u8; 4096];
-            let res = timeout(Duration::from_millis(1000), stream.read(&mut buffer[..])).await;
-            match res {
-                Ok(Ok(n)) => {
-                    let converted_buffer = String::from_utf8_lossy(&buffer[0..n]);
-                    return (PortStatus::Open, Some(converted_buffer.to_string()));
-                }
-                Ok(Err(e0)) => {
-                    return (PortStatus::Open, None);
+            let request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+            let f = stream.write_all(request).await;
+            match f {
+                Ok(_)=>{
+                    let res = timeout(Duration::from_millis(1000), stream.read(&mut buffer[..])).await;
+                    match res {
+                        Ok(Ok(n)) => {
+                            let converted_buffer = String::from_utf8_lossy(&buffer[0..n]);
+                            return (PortStatus::Open, Some(converted_buffer.to_string()));
+                        }
+                        Ok(Err(_)) => {
+                            return (PortStatus::Open, None);
+                        }
+                        Err(_) => {
+                            return (PortStatus::Open, None);
+                        }
+                    }
                 }
                 Err(_) => {
-                    return (PortStatus::Open, None);
+                    return (PortStatus::Open,None);
                 }
             }
         }
