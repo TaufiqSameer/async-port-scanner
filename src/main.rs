@@ -2,7 +2,7 @@ use clap::Parser;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt,AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -85,8 +85,8 @@ async fn main() {
                 }
             },
             Err(s) => match s {
-                ScanError::Semaphore(s) => {}
-                ScanError::Task(s) => {}
+                ScanError::Semaphore(_) => {}
+                ScanError::Task(_) => {}
             },
         }
     }
@@ -163,11 +163,39 @@ async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Option<String>) {
             let request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
             let f = stream.write_all(request).await;
             match f {
-                Ok(_)=>{
-                    let res = timeout(Duration::from_millis(1000), stream.read(&mut buffer[..])).await;
+                Ok(_) => {
+                    let res =
+                        timeout(Duration::from_millis(1000), stream.read(&mut buffer[..])).await;
                     match res {
                         Ok(Ok(n)) => {
                             let converted_buffer = String::from_utf8_lossy(&buffer[0..n]);
+                            let first_line = converted_buffer.lines().next();
+                            match first_line {
+                                Some(line) => {
+                                    let mut iter = line.split_whitespace();
+                                    let protocol = if let Some(val) = iter.next() {
+                                        val
+                                    } else {
+                                        "Empty"
+                                    };
+                                    let status: u16 = if let Some(val) = iter.next() {
+                                        match val.parse::<u16>() {
+                                            Ok(v) => v,
+                                            Err(_) => 0,
+                                        }
+                                    } else {
+                                        0
+                                    };
+                                    let response = iter.collect::<Vec<&str>>().join(" ");
+                                    println!(
+                                        "The line is {} {} {} {}",
+                                        line, protocol, status, response
+                                    );
+                                }
+                                None => {
+                                    println!("No line to print");
+                                }
+                            }
                             return (PortStatus::Open, Some(converted_buffer.to_string()));
                         }
                         Ok(Err(_)) => {
@@ -179,7 +207,7 @@ async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Option<String>) {
                     }
                 }
                 Err(_) => {
-                    return (PortStatus::Open,None);
+                    return (PortStatus::Open, None);
                 }
             }
         }
