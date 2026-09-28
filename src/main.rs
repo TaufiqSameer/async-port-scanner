@@ -11,6 +11,18 @@ enum PortStatus {
     Closed,
     TimedOut,
 }
+
+struct HttpInfo {
+    protocol : String,
+    status_code : u16,
+    reason : String,
+    server : Option<String>
+}
+impl HttpInfo {
+    fn new(protocol : String,status_code : u16, reason : String, server : Option<String>) -> Self {
+        HttpInfo { protocol, status_code, reason, server }
+    }
+}
 enum ScanError {
     Semaphore(tokio::sync::AcquireError),
     Task(tokio::task::JoinError),
@@ -21,6 +33,7 @@ struct ScanResult {
     ip: Ipv4Addr,
     banner: Option<String>,
 }
+
 
 impl ScanResult {
     fn new(port: u16, status: PortStatus, ip: Ipv4Addr, banner: Option<String>) -> Self {
@@ -186,11 +199,21 @@ async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Option<String>) {
                                     } else {
                                         0
                                     };
+                                    
                                     let response = iter.collect::<Vec<&str>>().join(" ");
                                     println!(
                                         "The line is {} {} {} {}",
                                         line, protocol, status, response
                                     );
+                                    let mut temp = None;
+                                    for line in converted_buffer.lines(){
+                                        if line.starts_with("Server:"){
+                                            println!("{}",&line[7..]);
+                                            temp = Some(line[7..].to_string());
+                                            // println!("{}",line.split_once(':'))
+                                        }
+                                    }
+                                    let hi = HttpInfo::new(protocol.to_string(), status, response,  temp);
                                 }
                                 None => {
                                     println!("No line to print");
