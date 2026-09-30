@@ -6,6 +6,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
+enum Service {
+    Http(Option<HttpInfo>),
+    Ssh,
+    Ftp,
+    Unknown,
+}
 enum PortStatus {
     Open,
     Closed,
@@ -13,14 +19,19 @@ enum PortStatus {
 }
 
 struct HttpInfo {
-    protocol : String,
-    status_code : u16,
-    reason : String,
-    server : Option<String>
+    protocol: String,
+    status_code: u16,
+    reason: String,
+    server: Option<String>,
 }
 impl HttpInfo {
-    fn new(protocol : String,status_code : u16, reason : String, server : Option<String>) -> Self {
-        HttpInfo { protocol, status_code, reason, server }
+    fn new(protocol: String, status_code: u16, reason: String, server: Option<String>) -> Self {
+        HttpInfo {
+            protocol,
+            status_code,
+            reason,
+            server,
+        }
     }
 }
 enum ScanError {
@@ -31,17 +42,16 @@ struct ScanResult {
     port: u16,
     status: PortStatus,
     ip: Ipv4Addr,
-    banner: Option<String>,
+    service: Service,
 }
 
-
 impl ScanResult {
-    fn new(port: u16, status: PortStatus, ip: Ipv4Addr, banner: Option<String>) -> Self {
+    fn new(port: u16, status: PortStatus, ip: Ipv4Addr, service : Service) -> Self {
         ScanResult {
             port: port,
             status: status,
             ip: ip,
-            banner: banner,
+            service: service,
         }
     }
 }
@@ -81,13 +91,19 @@ async fn main() {
     for scan in ports {
         match scan {
             Ok(s) => match s.status {
-                PortStatus::Open => match s.banner {
-                    Some(st) => {
-                        println!("Banner : {}", st);
-                        println!("[Open] {}:{}", s.ip, s.port);
+                PortStatus::Open => match s.service {
+                    Service::Http(e) => {
+                        match e {
+                            Some(e) => {
+                                println!("Protocol : {}",e.protocol);
+                            }
+                            None => {
+                                println!("No http info")
+                            }
+                        }
                     }
-                    None => {
-                        println!("[Open] {}:{}", s.ip, s.port);
+                    _ => {
+
                     }
                 },
                 PortStatus::TimedOut => {
@@ -148,7 +164,7 @@ async fn run_scan(
                         port,
                         status,
                         ip,
-                        banner: st,
+                        service : st,
                     })),
                     PortStatus::TimedOut => {
                         arr.push(Ok(ScanResult::new(port, status, ip, st)));
@@ -166,80 +182,92 @@ async fn run_scan(
     arr
 }
 
-async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Option<String>) {
+async fn http_probe(mut stream: TcpStream) -> Option<HttpInfo> {
+    let mut buffer = [0u8; 4096];
+    let request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let f = stream.write_all(request).await;
+    match f {
+        Ok(_) => {
+            let res = timeout(Duration::from_millis(1000), stream.read(&mut buffer[..])).await;
+            match res {
+                Ok(Ok(n)) => {
+                    let converted_buffer = String::from_utf8_lossy(&buffer[0..n]);
+                    let first_line = converted_buffer.lines().next();
+                    match first_line {
+                        Some(line) => {
+                            let mut iter = line.split_whitespace();
+                            let protocol = if let Some(val) = iter.next() {
+                                val
+                            } else {
+                                "Empty"
+                            };
+                            let status: u16 = if let Some(val) = iter.next() {
+                                match val.parse::<u16>() {
+                                    Ok(v) => v,
+                                    Err(_) => 0,
+                                }
+                            } else {
+                                0
+                            };
+
+                            let response = iter.collect::<Vec<&str>>().join(" ");
+                            // println!(
+                            //     "The line is {} {} {} {}",
+                            //     line, protocol, status, response
+                            // );
+                            let mut temp = None;
+                            for line in converted_buffer.lines() {
+                                if line.starts_with("Server:") {
+                                    // println!("{}",&line[7..]);
+                                    temp = Some(line[7..].to_string());
+                                    // println!("{}",line.split_once(':'))
+                                }
+                            }
+                            let hi = HttpInfo::new(protocol.to_string(), status, response, temp);
+                            return Some(hi);
+                        }
+                        None => {
+                            println!("No line to print");
+                        }
+                    }
+                    None
+                }
+                Ok(Err(_)) => None,
+                Err(_) => None,
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Service) {
     let socket_address = SocketAddr::new(std::net::IpAddr::V4(ip), port);
     let conn = TcpStream::connect(socket_address);
     let timer = timeout(Duration::from_millis(500), conn).await;
     match timer {
-        Ok(Ok(mut stream)) => {
-            let mut buffer = [0u8; 4096];
-            let request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-            let f = stream.write_all(request).await;
-            match f {
-                Ok(_) => {
-                    let res =
-                        timeout(Duration::from_millis(1000), stream.read(&mut buffer[..])).await;
-                    match res {
-                        Ok(Ok(n)) => {
-                            let converted_buffer = String::from_utf8_lossy(&buffer[0..n]);
-                            let first_line = converted_buffer.lines().next();
-                            match first_line {
-                                Some(line) => {
-                                    let mut iter = line.split_whitespace();
-                                    let protocol = if let Some(val) = iter.next() {
-                                        val
-                                    } else {
-                                        "Empty"
-                                    };
-                                    let status: u16 = if let Some(val) = iter.next() {
-                                        match val.parse::<u16>() {
-                                            Ok(v) => v,
-                                            Err(_) => 0,
-                                        }
-                                    } else {
-                                        0
-                                    };
-                                    
-                                    let response = iter.collect::<Vec<&str>>().join(" ");
-                                    println!(
-                                        "The line is {} {} {} {}",
-                                        line, protocol, status, response
-                                    );
-                                    let mut temp = None;
-                                    for line in converted_buffer.lines(){
-                                        if line.starts_with("Server:"){
-                                            println!("{}",&line[7..]);
-                                            temp = Some(line[7..].to_string());
-                                            // println!("{}",line.split_once(':'))
-                                        }
-                                    }
-                                    let hi = HttpInfo::new(protocol.to_string(), status, response,  temp);
-                                }
-                                None => {
-                                    println!("No line to print");
-                                }
-                            }
-                            return (PortStatus::Open, Some(converted_buffer.to_string()));
-                        }
-                        Ok(Err(_)) => {
-                            return (PortStatus::Open, None);
-                        }
-                        Err(_) => {
-                            return (PortStatus::Open, None);
-                        }
-                    }
+        Ok(Ok(stream)) => {
+            let remote = stream.peer_addr().unwrap();
+            let mut ip = remote.ip();
+            let mut port = remote.port();
+            match port {
+                80 => {
+                    let http_info = http_probe(stream).await;
+                    return (PortStatus::Open, Service::Http(http_info));
                 }
-                Err(_) => {
-                    return (PortStatus::Open, None);
+                22 => {
+                    return (PortStatus::Open,Service::Ssh);
+                }
+                _ => {
+                    return (PortStatus::Open,Service::Unknown);
                 }
             }
         }
         Ok(Err(_)) => {
-            return (PortStatus::Closed, None);
+            return (PortStatus::Closed, Service::Unknown);
         }
         Err(_) => {
             // println!("The port is not open, {}",val);
-            return (PortStatus::TimedOut, None);
+            return (PortStatus::TimedOut, Service::Unknown);
         }
     }
 }
