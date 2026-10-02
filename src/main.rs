@@ -102,6 +102,9 @@ async fn main() {
                             }
                         }
                     }
+                    Service::Ssh => {
+                        println!("SSH open")
+                    }
                     _ => {
 
                     }
@@ -224,7 +227,12 @@ async fn http_probe(mut stream: TcpStream) -> Option<HttpInfo> {
                                 }
                             }
                             let hi = HttpInfo::new(protocol.to_string(), status, response, temp);
-                            return Some(hi);
+                            if protocol.starts_with("HTTP/1.0") || protocol.starts_with("HTTP/1.1"){
+                                return Some(hi);
+                            }
+                            else{
+                                return None;
+                            }
                         }
                         None => {
                             println!("No line to print");
@@ -245,22 +253,36 @@ async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Service) {
     let conn = TcpStream::connect(socket_address);
     let timer = timeout(Duration::from_millis(500), conn).await;
     match timer {
-        Ok(Ok(stream)) => {
+        Ok(Ok(mut stream)) => {
             let remote = stream.peer_addr().unwrap();
-            let mut ip = remote.ip();
-            let mut port = remote.port();
-            match port {
-                80 => {
-                    let http_info = http_probe(stream).await;
-                    return (PortStatus::Open, Service::Http(http_info));
+            let mut buffer = [0u8; 1024];
+            let n = timeout(Duration::from_millis(100), stream.read(&mut buffer)).await;
+            // let mut ip = remote.ip();
+            // let mut port = remote.port();
+            match n {
+                Ok(Ok(size)) => {
+                    let text = String::from_utf8_lossy(&buffer[..size]);
+                    if text.starts_with("SSH-"){
+                        return (PortStatus::Open, Service::Ssh);
+                    }
                 }
-                22 => {
-                    return (PortStatus::Open,Service::Ssh);
+                Ok(Err(_)) => {
+                    println!("Error while timeout")
                 }
-                _ => {
-                    return (PortStatus::Open,Service::Unknown);
+                Err(_) => {
+                    // println!("Error while reading the stream");
+                } 
+            }
+            let http_port = http_probe(stream).await;
+            match http_port {
+                Some(val) => {
+                    return (PortStatus::Open,Service::Http(Some(val)));
+                }
+                None => {
+                    return (PortStatus::Closed,Service::Unknown);
                 }
             }
+     
         }
         Ok(Err(_)) => {
             return (PortStatus::Closed, Service::Unknown);
