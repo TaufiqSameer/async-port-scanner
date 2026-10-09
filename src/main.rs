@@ -46,7 +46,7 @@ struct ScanResult {
 }
 
 impl ScanResult {
-    fn new(port: u16, status: PortStatus, ip: Ipv4Addr, service : Service) -> Self {
+    fn new(port: u16, status: PortStatus, ip: Ipv4Addr, service: Service) -> Self {
         ScanResult {
             port: port,
             status: status,
@@ -92,22 +92,26 @@ async fn main() {
         match scan {
             Ok(s) => match s.status {
                 PortStatus::Open => match s.service {
-                    Service::Http(e) => {
-                        match e {
-                            Some(e) => {
-                                println!("Protocol : {}",e.protocol);
-                            }
-                            None => {
-                                println!("No http info")
+                    Service::Http(e) => match e {
+                        Some(e) => {
+                            println!("Protocol : {}", e.protocol);
+                            println!("Status : {}", e.status_code);
+                            println!("reason : {}", e.reason);
+                            match e.server {
+                                Some(val) => {
+                                    println!("Server : {}", val);
+                                }
+                                None => {}
                             }
                         }
-                    }
+                        None => {
+                            println!("No http info")
+                        }
+                    },
                     Service::Ssh => {
                         println!("SSH open")
                     }
-                    _ => {
-
-                    }
+                    _ => {}
                 },
                 PortStatus::TimedOut => {
                     println!("[TimedOut] port {}:{}", s.ip, s.port);
@@ -167,7 +171,7 @@ async fn run_scan(
                         port,
                         status,
                         ip,
-                        service : st,
+                        service: st,
                     })),
                     PortStatus::TimedOut => {
                         arr.push(Ok(ScanResult::new(port, status, ip, st)));
@@ -227,10 +231,10 @@ async fn http_probe(mut stream: TcpStream) -> Option<HttpInfo> {
                                 }
                             }
                             let hi = HttpInfo::new(protocol.to_string(), status, response, temp);
-                            if protocol.starts_with("HTTP/1.0") || protocol.starts_with("HTTP/1.1"){
+                            if protocol.starts_with("HTTP/1.0") || protocol.starts_with("HTTP/1.1")
+                            {
                                 return Some(hi);
-                            }
-                            else{
+                            } else {
                                 return None;
                             }
                         }
@@ -262,7 +266,7 @@ async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Service) {
             match n {
                 Ok(Ok(size)) => {
                     let text = String::from_utf8_lossy(&buffer[..size]);
-                    if text.starts_with("SSH-"){
+                    if text.starts_with("SSH-") {
                         return (PortStatus::Open, Service::Ssh);
                     }
                 }
@@ -271,18 +275,17 @@ async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Service) {
                 }
                 Err(_) => {
                     // println!("Error while reading the stream");
-                } 
+                }
             }
             let http_port = http_probe(stream).await;
             match http_port {
                 Some(val) => {
-                    return (PortStatus::Open,Service::Http(Some(val)));
+                    return (PortStatus::Open, Service::Http(Some(val)));
                 }
                 None => {
-                    return (PortStatus::Closed,Service::Unknown);
+                    return (PortStatus::Open, Service::Unknown);
                 }
             }
-     
         }
         Ok(Err(_)) => {
             return (PortStatus::Closed, Service::Unknown);
