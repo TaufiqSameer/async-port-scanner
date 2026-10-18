@@ -6,6 +6,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::{TlsConnector, rustls};
+
 enum Service {
     Http(Option<HttpInfo>),
     Ssh,
@@ -66,6 +69,40 @@ struct Cli {
     concurrency: usize,
 }
 
+fn create_tls_connector() -> TlsConnector {
+    let root_cert_store =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_cert_store)
+        .with_no_client_auth();
+    TlsConnector::from(Arc::new(config))
+}
+async fn tls_probe(ip: Ipv4Addr, port: u16, connector: &TlsConnector) -> bool {
+    let addr = SocketAddr::new(ip.into(), port);
+    let stream = match timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(_)) => return false,
+        Err(_) => return false,
+    };
+    let server_name = match ServerName::try_from(ip.to_string()) {
+        Ok(name) => name,
+        Err(_) => return false,
+    };
+    match timeout(
+        Duration::from_secs(2),
+        connector.connect(server_name, stream),
+    )
+    .await
+    {
+        Ok(e) => match e {
+            Ok(f) => true,
+            Err(_) => false,
+        },
+        Err(_) => {
+            return false;
+        }
+    }
+}
 #[tokio::main]
 async fn main() {
     let args = Cli::parse();
@@ -86,6 +123,9 @@ async fn main() {
     // let _port_to_be_scanned = 3000;
     let start = Instant::now();
     println!("{}", args.ipv4);
+    let connector = create_tls_connector();
+    let result = tls_probe("1.1.1.1".parse().unwrap(), 443, &connector).await;
+    println!("TLS detected: {}", result);
     let ip = args.ipv4;
     let ports = run_scan(ip, start_port, end_port, concurr).await;
     for scan in ports {
