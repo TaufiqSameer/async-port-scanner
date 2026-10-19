@@ -11,6 +11,8 @@ use tokio_rustls::{TlsConnector, rustls};
 
 enum Service {
     Http(Option<HttpInfo>),
+    Https(Option<HttpInfo>),
+    Tls,
     Ssh,
     Ftp,
     Unknown,
@@ -70,23 +72,43 @@ struct Cli {
 }
 
 fn create_tls_connector() -> TlsConnector {
-    let root_cert_store =
+    let mut root_cert_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let cert_pem = std::fs::read("tls-test/cert.pem").expect("Failed to read test certificate");
+
+    let mut reader = std::io::BufReader::new(&cert_pem[..]);
+
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("Failed to parse test certificate");
+
+    for cert in certs {
+        root_cert_store
+            .add(cert)
+            .expect("Failed to add test certificate");
+    }
+
     let config = rustls::ClientConfig::builder()
         .with_root_certificates(root_cert_store)
         .with_no_client_auth();
+
     TlsConnector::from(Arc::new(config))
 }
-async fn tls_probe(ip: Ipv4Addr, port: u16, connector: &TlsConnector) -> bool {
-    let addr = SocketAddr::new(ip.into(), port);
-    let stream = match timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(_)) => return false,
-        Err(_) => return false,
-    };
+async fn tls_probe(
+    stream: TcpStream,
+    ip: Ipv4Addr,
+    connector: &TlsConnector,
+) -> Option<tokio_rustls::client::TlsStream<TcpStream>> {
+    // let addr = SocketAddr::new(ip.into(), port);
+    // let stream = match timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+    //     Ok(Ok(stream)) => stream,
+    //     Ok(Err(_)) => return false,
+    //     Err(_) => return false,
+    // };
     let server_name = match ServerName::try_from(ip.to_string()) {
         Ok(name) => name,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     match timeout(
         Duration::from_secs(2),
@@ -95,11 +117,11 @@ async fn tls_probe(ip: Ipv4Addr, port: u16, connector: &TlsConnector) -> bool {
     .await
     {
         Ok(e) => match e {
-            Ok(f) => true,
-            Err(_) => false,
+            Ok(f) => Some(f),
+            Err(_) => None,
         },
         Err(_) => {
-            return false;
+            return None;
         }
     }
 }
@@ -123,15 +145,29 @@ async fn main() {
     // let _port_to_be_scanned = 3000;
     let start = Instant::now();
     println!("{}", args.ipv4);
-    let connector = create_tls_connector();
-    let result = tls_probe("1.1.1.1".parse().unwrap(), 443, &connector).await;
-    println!("TLS detected: {}", result);
     let ip = args.ipv4;
     let ports = run_scan(ip, start_port, end_port, concurr).await;
     for scan in ports {
         match scan {
             Ok(s) => match s.status {
                 PortStatus::Open => match s.service {
+                    Service::Https(e) => match e {
+                        Some(e) => {
+                            println!("Protocol : {}", e.protocol);
+                            println!("Status : {}", e.status_code);
+                            println!("reason : {}", e.reason);
+                            match e.server {
+                                Some(val) => {
+                                    println!("Server : {}", val);
+                                }
+                                None => {}
+                            }
+                            println!("TLS OPEN ON PORT {}", s.port);
+                        }
+                        None => {
+                            println!("No http info")
+                        }
+                    },
                     Service::Http(e) => match e {
                         Some(e) => {
                             println!("Protocol : {}", e.protocol);
@@ -185,7 +221,8 @@ async fn run_scan(
             let permit = semaphore.acquire_owned().await;
             match permit {
                 Ok(_) => {
-                    let scan = port_scan(ip, port_number).await;
+                    let connector = create_tls_connector();
+                    let scan = port_scan(ip, port_number, &connector).await;
                     Ok(scan)
                 }
                 Err(e) => Err(e),
@@ -291,13 +328,99 @@ async fn http_probe(mut stream: TcpStream) -> Option<HttpInfo> {
         Err(_) => None,
     }
 }
+async fn https_probe(mut stream: tokio_rustls::client::TlsStream<TcpStream>) -> Option<HttpInfo> {
+    let mut buffer = [0u8; 4096];
+    let request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let f = stream.write_all(request).await;
+    match f {
+        Ok(_) => {
+            let res = timeout(Duration::from_millis(1000), stream.read(&mut buffer[..])).await;
+            match res {
+                Ok(Ok(n)) => {
+                    let converted_buffer = String::from_utf8_lossy(&buffer[0..n]);
+                    let first_line = converted_buffer.lines().next();
+                    match first_line {
+                        Some(line) => {
+                            let mut iter = line.split_whitespace();
+                            let protocol = if let Some(val) = iter.next() {
+                                val
+                            } else {
+                                "Empty"
+                            };
+                            let status: u16 = if let Some(val) = iter.next() {
+                                match val.parse::<u16>() {
+                                    Ok(v) => v,
+                                    Err(_) => 0,
+                                }
+                            } else {
+                                0
+                            };
 
-async fn port_scan(ip: Ipv4Addr, port: u16) -> (PortStatus, Service) {
+                            let response = iter.collect::<Vec<&str>>().join(" ");
+                            // println!(
+                            //     "The line is {} {} {} {}",
+                            //     line, protocol, status, response
+                            // );
+                            let mut temp = None;
+                            for line in converted_buffer.lines() {
+                                if line.starts_with("Server:") {
+                                    // println!("{}",&line[7..]);
+                                    temp = Some(line[7..].to_string());
+                                    // println!("{}",line.split_once(':'))
+                                }
+                            }
+                            let hi = HttpInfo::new(protocol.to_string(), status, response, temp);
+                            if protocol.starts_with("HTTP/1.0") || protocol.starts_with("HTTP/1.1")
+                            {
+                                return Some(hi);
+                            } else {
+                                return None;
+                            }
+                        }
+                        None => {
+                            println!("No line to print");
+                        }
+                    }
+                    None
+                }
+                Ok(Err(_)) => None,
+                Err(_) => None,
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+async fn port_scan(ip: Ipv4Addr, port: u16, connector: &TlsConnector) -> (PortStatus, Service) {
     let socket_address = SocketAddr::new(std::net::IpAddr::V4(ip), port);
     let conn = TcpStream::connect(socket_address);
     let timer = timeout(Duration::from_millis(500), conn).await;
     match timer {
         Ok(Ok(mut stream)) => {
+            let st = match timeout(
+                Duration::from_millis(500),
+                TcpStream::connect(socket_address),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(_)) => return (PortStatus::Closed, Service::Unknown),
+                Err(_) => return (PortStatus::TimedOut, Service::Unknown),
+            };
+            let mut tls_scan = tls_probe(st, ip, connector).await;
+            match tls_scan {
+                Some(stream) => match https_probe(stream).await {
+                    Some(f) => {
+                        return (PortStatus::Open, Service::Https(Some(f)));
+                    }
+                    None => {
+                        return (PortStatus::Open, Service::Tls);
+                    }
+                },
+                None => {
+                    // return (PortStatus::Closed,Service::Unknown);
+                }
+            }
             let remote = stream.peer_addr().unwrap();
             let mut buffer = [0u8; 1024];
             let n = timeout(Duration::from_millis(100), stream.read(&mut buffer)).await;

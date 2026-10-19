@@ -1,1 +1,3 @@
 /target
+tls-test/key.pem
+tls-test/cert.pem
