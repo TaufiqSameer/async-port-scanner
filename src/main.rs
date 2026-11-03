@@ -75,7 +75,7 @@ fn create_tls_connector() -> TlsConnector {
     let mut root_cert_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    let cert_pem = std::fs::read("tls-test/cert.pem").expect("Failed to read test certificate");
+    let cert_pem = std::fs::read("tls-test/ca.pem").expect("Failed to read test certificate");
 
     let mut reader = std::io::BufReader::new(&cert_pem[..]);
 
@@ -118,7 +118,8 @@ async fn tls_probe(
     {
         Ok(e) => match e {
             Ok(f) => Some(f),
-            Err(_) => None,
+            Err(e) => {eprintln!("TLS handshake failed : {}",e);
+            None},
         },
         Err(_) => {
             return None;
@@ -185,7 +186,10 @@ async fn main() {
                         }
                     },
                     Service::Ssh => {
-                        println!("SSH open")
+                        println!("SSH open");
+                    }
+                    Service::Tls => {
+                        println!("TLS open detected on port {}", s.port);
                     }
                     _ => {}
                 },

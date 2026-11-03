@@ -1,3 +1,6 @@
 /target
 tls-test/key.pem
 tls-test/cert.pem
+tls-test/*.pem
+tls-test/*.csr
+tls-test/*.srl
