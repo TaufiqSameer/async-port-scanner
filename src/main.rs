@@ -147,7 +147,8 @@ async fn main() {
     let start = Instant::now();
     println!("{}", args.ipv4);
     let ip = args.ipv4;
-    let ports = run_scan(ip, start_port, end_port, concurr).await;
+    let connector = Arc::new(create_tls_connector());
+    let ports = run_scan(ip, start_port, end_port, concurr,connector).await;
     for scan in ports {
         match scan {
             Ok(s) => match s.status {
@@ -215,17 +216,18 @@ async fn run_scan(
     start_port: u16,
     end_port: u16,
     concurrency: usize,
+    connector : Arc<TlsConnector>
 ) -> Vec<Result<ScanResult, ScanError>> {
     let mut arr = Vec::new();
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::new();
     for port_number in start_port..=end_port {
+        let connector = Arc::clone(&connector);
         let semaphore = Arc::clone(&semaphore);
         let res = tokio::spawn(async move {
             let permit = semaphore.acquire_owned().await;
             match permit {
                 Ok(_) => {
-                    let connector = create_tls_connector();
                     let scan = port_scan(ip, port_number, &connector).await;
                     Ok(scan)
                 }
@@ -407,22 +409,24 @@ async fn port_scan(ip: Ipv4Addr, port: u16, connector: &TlsConnector) -> (PortSt
             )
             .await
             {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(_)) => return (PortStatus::Closed, Service::Unknown),
-                Err(_) => return (PortStatus::TimedOut, Service::Unknown),
+                Ok(Ok(stream)) => Some(stream),
+                Ok(Err(_)) => None,
+                Err(_) => None,
             };
-            let mut tls_scan = tls_probe(st, ip, connector).await;
-            match tls_scan {
-                Some(stream) => match https_probe(stream).await {
-                    Some(f) => {
-                        return (PortStatus::Open, Service::Https(Some(f)));
-                    }
+            if let Some(st) = st {
+                let mut tls_scan = tls_probe(st, ip, connector).await;
+                match tls_scan {
+                    Some(stream) => match https_probe(stream).await {
+                        Some(f) => {
+                            return (PortStatus::Open, Service::Https(Some(f)));
+                        }
+                        None => {
+                            return (PortStatus::Open, Service::Tls);
+                        }
+                    },
                     None => {
-                        return (PortStatus::Open, Service::Tls);
+                        // return (PortStatus::Closed,Service::Unknown);
                     }
-                },
-                None => {
-                    // return (PortStatus::Closed,Service::Unknown);
                 }
             }
             let remote = stream.peer_addr().unwrap();
