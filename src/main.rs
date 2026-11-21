@@ -13,7 +13,15 @@ struct ProbeContext {
     stream: TcpStream,
     banner: Vec<u8>,
 }
-
+fn has_220_greeting(ctx: &ProbeContext) -> bool {
+    ctx.banner.starts_with(b"220 ")
+}
+// fn ftp_probe(ctx: &ProbeContext) -> bool {
+//     ctx.banner.starts_with(b"220 ")
+// }
+fn smtp_probe(ctx: &ProbeContext) -> bool {
+    ctx.banner.starts_with(b"220 ")
+}
 enum Service {
     Http(Option<HttpInfo>),
     Https(Option<HttpInfo>),
@@ -47,19 +55,14 @@ impl HttpInfo {
 impl ProbeContext {
     async fn new(mut stream: TcpStream) -> Self {
         let banner = read_banner(&mut stream).await;
-        ProbeContext {
-            stream,
-            banner
-        }
+
+        ProbeContext { stream, banner }
     }
 }
 async fn read_banner(stream: &mut TcpStream) -> Vec<u8> {
     let mut buffer = [0u8; 1024];
 
-    match timeout(
-        Duration::from_millis(500),
-        stream.read(&mut buffer),
-    ).await {
+    match timeout(Duration::from_millis(500), stream.read(&mut buffer)).await {
         Ok(Ok(size)) => buffer[..size].to_vec(),
         _ => Vec::new(),
     }
@@ -96,11 +99,7 @@ struct Cli {
     concurrency: usize,
 }
 
-async fn tls_service_probe(
-    ip: Ipv4Addr,
-    port: u16,
-    connector: &TlsConnector,
-) -> Option<Service> {
+async fn tls_service_probe(ip: Ipv4Addr, port: u16, connector: &TlsConnector) -> Option<Service> {
     // Your implementation
     let socket_address = SocketAddr::new(std::net::IpAddr::V4(ip), port);
     let st = match timeout(
@@ -160,44 +159,75 @@ fn create_tls_connector() -> TlsConnector {
 async fn detect_service(
     ip: Ipv4Addr,
     port: u16,
-    stream: &mut TcpStream,
+    stream: TcpStream,
     connector: &TlsConnector,
 ) -> Service {
+    let mut ctx = ProbeContext::new(stream).await;
     match tls_service_probe(ip, port, connector).await {
         Some(f) => {
             return f;
         }
-        None => {
-
-        }
+        None => {}
     }
-    if ssh_probe(stream).await {
+    if ssh_probe(&ctx) {
         return Service::Ssh;
     }
-    match http_probe(stream).await {
+    match http_probe(&mut ctx.stream).await {
         Some(info) => Service::Http(Some(info)),
         None => Service::Unknown,
     }
 }
 
-async fn ssh_probe(stream: &mut TcpStream) -> bool {
-    let mut buffer = [0u8; 1024];
-    let n = timeout(Duration::from_millis(100), stream.read(&mut buffer)).await;
-    match n {
-        Ok(Ok(size)) => {
-            let text = String::from_utf8_lossy(&buffer[..size]);
-            if text.starts_with("SSH-") {
-                return true;
+async fn ftp_probe(ctx: &mut ProbeContext) -> bool {
+    // 1. Send FEAT\r\n through ctx.stream
+    // 2. Read the server's response
+    // 3. Check whether it starts with the expected FTP response
+    let mut buffer = [0u8; 4096];
+    let req = b"FEAT\r\n";
+    let f = ctx.stream.write_all(req).await;
+    match f {
+        Ok(_) => {
+            let res = timeout(Duration::from_millis(500), ctx.stream.read(&mut buffer[..])).await;
+            match res {
+                Ok(Ok(n)) => {
+                    if n == 0 {
+                        return false;
+                    }
+                    let converted = String::from_utf8_lossy(&buffer[0..n]);
+                    let lines = converted.lines().next();
+                    match lines {
+                        Some(line) => {
+                            let mut iter = line.split_whitespace();
+                            let msg = if let Some(val) = iter.next() {
+                                val
+                            } else {
+                                "Empty"
+                            };
+                            let is_ftp = msg.starts_with("211");
+                        }
+
+                        None => {
+                            println!("no ftp probe");
+                        }
+                    }
+                }
+                Ok(Err(_)) => {
+                    return false;
+                }
+                Err(_) => {
+                    return false;
+                }
             }
-        }
-        Ok(Err(_)) => {
-            println!("Error while timeout")
         }
         Err(_) => {
             return false;
         }
     }
-    false
+    return false;
+}
+
+fn ssh_probe(ctx: &ProbeContext) -> bool {
+    ctx.banner.starts_with(b"SSH-")
 }
 async fn tls_probe(
     stream: TcpStream,
@@ -509,7 +539,7 @@ async fn port_scan(ip: Ipv4Addr, port: u16, connector: &TlsConnector) -> (PortSt
     let timer = timeout(Duration::from_millis(500), conn).await;
     match timer {
         Ok(Ok(mut stream)) => {
-            let service = detect_service(ip, port, &mut stream, connector).await;
+            let service = detect_service(ip, port, stream, connector).await;
 
             (PortStatus::Open, service)
         }
