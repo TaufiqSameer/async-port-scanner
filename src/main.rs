@@ -156,6 +156,59 @@ fn create_tls_connector() -> TlsConnector {
 
     TlsConnector::from(Arc::new(config))
 }
+async fn read_ftp_response(stream: &mut TcpStream) -> Option<String> {
+    let mut buffer = [0u8; 4096];
+    let mut response = Vec::new();
+    let mut response_code = None;
+    let readd = timeout(Duration::from_millis(500), async {
+        loop {
+            let n = match stream.read(&mut buffer).await {
+                Ok(n) => n,
+                Err(_) => return None,
+            };
+            if n == 0 {
+                return None;
+            }
+            response.extend_from_slice(&buffer[0..n]);
+            if !response.windows(2).any(|w| w == b"\r\n") {
+                continue;
+            }
+            if !response.ends_with(b"\r\n") {
+                continue;
+            }
+            let converted = String::from_utf8_lossy(&response);
+            let Some(first_line) = converted.lines().next() else {
+                continue;
+            };
+            
+            if first_line.len() < 4 {
+                continue;
+            }
+            let code = first_line.get(0..3)?;
+            if response_code.is_none() {
+                response_code = Some(code.to_string());
+            }
+            let last_line = converted.lines().last()?;
+            let code = response_code.as_ref()?;
+            let complete = last_line.starts_with(&format!("{} ", code));
+            if complete {
+                return Some(converted.to_string());
+            }
+        }
+    })
+    .await;
+    match readd {
+        Ok(Some(f)) => {
+            return Some(f);
+        }
+        Ok(None) => {
+            return None;
+        }
+        Err(_) => {
+            return None;
+        }
+    }
+}
 async fn detect_service(
     ip: Ipv4Addr,
     port: u16,
@@ -172,9 +225,13 @@ async fn detect_service(
     if ssh_probe(&ctx) {
         return Service::Ssh;
     }
+    if has_220_greeting(&ctx) && ftp_probe(&mut ctx).await {
+        return Service::Ftp;
+    }
+
     match http_probe(&mut ctx.stream).await {
-        Some(info) => Service::Http(Some(info)),
-        None => Service::Unknown,
+        Some(info) => return Service::Http(Some(info)),
+        None => return Service::Unknown,
     }
 }
 
@@ -187,34 +244,13 @@ async fn ftp_probe(ctx: &mut ProbeContext) -> bool {
     let f = ctx.stream.write_all(req).await;
     match f {
         Ok(_) => {
-            let res = timeout(Duration::from_millis(500), ctx.stream.read(&mut buffer[..])).await;
+            let res = read_ftp_response(&mut ctx.stream).await;
             match res {
-                Ok(Ok(n)) => {
-                    if n == 0 {
-                        return false;
-                    }
-                    let converted = String::from_utf8_lossy(&buffer[0..n]);
-                    let lines = converted.lines().next();
-                    match lines {
-                        Some(line) => {
-                            let mut iter = line.split_whitespace();
-                            let msg = if let Some(val) = iter.next() {
-                                val
-                            } else {
-                                "Empty"
-                            };
-                            let is_ftp = msg.starts_with("211");
-                        }
-
-                        None => {
-                            println!("no ftp probe");
-                        }
-                    }
+                Some(e) => {
+                    let is_ftp = e.starts_with("211-") || e.starts_with("211 ");
+                    return is_ftp;
                 }
-                Ok(Err(_)) => {
-                    return false;
-                }
-                Err(_) => {
+                None => {
                     return false;
                 }
             }
@@ -223,7 +259,6 @@ async fn ftp_probe(ctx: &mut ProbeContext) -> bool {
             return false;
         }
     }
-    return false;
 }
 
 fn ssh_probe(ctx: &ProbeContext) -> bool {
@@ -327,6 +362,9 @@ async fn main() {
                     }
                     Service::Tls => {
                         println!("TLS open detected on port {}", s.port);
+                    }
+                    Service::Ftp => {
+                        println!("FTP detected on the port {}", s.port);
                     }
                     _ => {}
                 },
