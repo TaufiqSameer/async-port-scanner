@@ -19,8 +19,33 @@ fn has_220_greeting(ctx: &ProbeContext) -> bool {
 // fn ftp_probe(ctx: &ProbeContext) -> bool {
 //     ctx.banner.starts_with(b"220 ")
 // }
-fn smtp_probe(ctx: &ProbeContext) -> bool {
-    ctx.banner.starts_with(b"220 ")
+async fn smtp_probe(ip: Ipv4Addr, port: u16) -> bool {
+    let Some(mut stream) = open_probe_connection(ip, port).await else {
+        return false;
+    };
+    let greeting = read_protocol_response(&mut stream).await;
+    if !matches!(greeting, Some(ref response) if response.starts_with("220 ")) {
+        return false;
+    }
+    let req = b"EHLO nexus.local\r\n";
+    let writing = stream.write_all(req).await;
+    match writing {
+        Ok(_) => {
+            let res = read_protocol_response(&mut stream).await;
+            match res {
+                Some(e) => {
+                    let is_smtp = e.starts_with("250-") || e.starts_with("250 ");
+                    return is_smtp;
+                }
+                None => {
+                    return false;
+                }
+            }
+        }
+        Err(_) => {
+            return false;
+        }
+    }
 }
 enum Service {
     Http(Option<HttpInfo>),
@@ -28,6 +53,7 @@ enum Service {
     Tls,
     Ssh,
     Ftp,
+    Smtp,
     Unknown,
 }
 enum PortStatus {
@@ -65,6 +91,14 @@ async fn read_banner(stream: &mut TcpStream) -> Vec<u8> {
     match timeout(Duration::from_millis(500), stream.read(&mut buffer)).await {
         Ok(Ok(size)) => buffer[..size].to_vec(),
         _ => Vec::new(),
+    }
+}
+async fn open_probe_connection(ip: Ipv4Addr, port: u16) -> Option<TcpStream> {
+    let address = SocketAddr::new(ip.into(), port);
+
+    match timeout(Duration::from_millis(500), TcpStream::connect(address)).await {
+        Ok(Ok(stream)) => Some(stream),
+        _ => None,
     }
 }
 enum ScanError {
@@ -156,7 +190,7 @@ fn create_tls_connector() -> TlsConnector {
 
     TlsConnector::from(Arc::new(config))
 }
-async fn read_ftp_response(stream: &mut TcpStream) -> Option<String> {
+async fn read_protocol_response(stream: &mut TcpStream) -> Option<String> {
     let mut buffer = [0u8; 4096];
     let mut response = Vec::new();
     let mut response_code = None;
@@ -180,13 +214,19 @@ async fn read_ftp_response(stream: &mut TcpStream) -> Option<String> {
             let Some(first_line) = converted.lines().next() else {
                 continue;
             };
-            
+
             if first_line.len() < 4 {
                 continue;
             }
             let code = first_line.get(0..3)?;
+            if !code.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
             if response_code.is_none() {
                 response_code = Some(code.to_string());
+            }
+            if !matches!(first_line.as_bytes().get(3), Some(b'-' | b' ')) {
+                return None;
             }
             let last_line = converted.lines().last()?;
             let code = response_code.as_ref()?;
@@ -225,8 +265,12 @@ async fn detect_service(
     if ssh_probe(&ctx) {
         return Service::Ssh;
     }
-    if has_220_greeting(&ctx) && ftp_probe(&mut ctx).await {
-        return Service::Ftp;
+    if has_220_greeting(&ctx) {
+        if ftp_probe(ip, port).await {
+            return Service::Ftp;
+        } else if smtp_probe(ip, port).await {
+            return Service::Smtp;
+        }
     }
 
     match http_probe(&mut ctx.stream).await {
@@ -235,16 +279,19 @@ async fn detect_service(
     }
 }
 
-async fn ftp_probe(ctx: &mut ProbeContext) -> bool {
-    // 1. Send FEAT\r\n through ctx.stream
-    // 2. Read the server's response
-    // 3. Check whether it starts with the expected FTP response
-    let mut buffer = [0u8; 4096];
+async fn ftp_probe(ip: Ipv4Addr, port: u16) -> bool {
+    let Some(mut stream) = open_probe_connection(ip, port).await else {
+        return false;
+    };
+    let greeting = read_protocol_response(&mut stream).await;
+    if !matches!(greeting, Some(ref response) if response.starts_with("220 ")) {
+        return false;
+    }
     let req = b"FEAT\r\n";
-    let f = ctx.stream.write_all(req).await;
+    let f = stream.write_all(req).await;
     match f {
         Ok(_) => {
-            let res = read_ftp_response(&mut ctx.stream).await;
+            let res = read_protocol_response(&mut stream).await;
             match res {
                 Some(e) => {
                     let is_ftp = e.starts_with("211-") || e.starts_with("211 ");
@@ -365,6 +412,9 @@ async fn main() {
                     }
                     Service::Ftp => {
                         println!("FTP detected on the port {}", s.port);
+                    }
+                    Service::Smtp => {
+                        println!("SMTP port detected on {}", s.port);
                     }
                     _ => {}
                 },
